@@ -1,126 +1,114 @@
 /*
  * Pure software AES-256-GCM reference implementation.
- * No AES-NI, no PCLMULQDQ — bit-level GF(2^128) and table-less AES.
+ * Table-based AES (256B sbox) + 4-bit Shoup table GHASH.
+ * No AES-NI, no PCLMULQDQ.
  *
- * Sources:
- *   GCM:    SUPERCOP crypto_aead/aes256gcmv1/ref (D.J.Bernstein)
- *   AES:    SUPERCOP crypto_core/aes256encrypt/ref (D.J.Bernstein)
- *   Verify: SUPERCOP crypto_verify/16/ref
+ * AES: table-based with pre-expanded round keys
+ * GHASH: 4-bit multiplication table (Shoup's method)
  */
 
 #include "crypto_aead.h"
 #include <string.h>
+#include <stdint.h>
 
 /* ================================================================== */
-/* Pure-C AES-256 block encrypt (no tables, no AES-NI)                */
+/* Table-based AES-256 (256B sbox, pre-expanded key)                  */
 /* ================================================================== */
 
-static unsigned char aes_multiply(unsigned int c, unsigned int d)
+static const uint8_t sbox[256] = {
+  0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+  0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+  0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+  0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+  0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+  0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+  0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+  0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+  0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+  0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+  0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+  0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+  0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+  0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+  0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+  0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+};
+
+static uint8_t rcon(uint8_t i)
 {
-  unsigned char f[8], g[8], h[15];
-  unsigned char result;
-  int i, j;
-  for (i = 0; i < 8; ++i) f[i] = (c >> i) & 1;
-  for (i = 0; i < 8; ++i) g[i] = (d >> i) & 1;
-  for (i = 0; i < 15; ++i) h[i] = 0;
-  for (i = 0; i < 8; ++i)
-    for (j = 0; j < 8; ++j) h[i + j] ^= f[i] & g[j];
-  for (i = 6; i >= 0; --i) {
-    h[i + 0] ^= h[i + 8];
-    h[i + 1] ^= h[i + 8];
-    h[i + 3] ^= h[i + 8];
-    h[i + 4] ^= h[i + 8];
-    h[i + 8] ^= h[i + 8];
-  }
-  result = 0;
-  for (i = 0; i < 8; ++i) result |= h[i] << i;
-  return result;
+  uint8_t c = 1;
+  while (i > 1) { c = (uint8_t)((c << 1) ^ ((c & 0x80) ? 0x1B : 0)); --i; }
+  return c;
 }
 
-static unsigned char aes_square(unsigned char c) { return aes_multiply(c, c); }
-static unsigned char aes_xtime(unsigned char c) { return aes_multiply(c, 2); }
-
-static unsigned char aes_bytesub(unsigned char c)
+static void subword(uint8_t w[4])
 {
-  unsigned char c3 = aes_multiply(aes_square(c), c);
-  unsigned char c7 = aes_multiply(aes_square(c3), c);
-  unsigned char c63 = aes_multiply(aes_square(aes_square(aes_square(c7))), c7);
-  unsigned char c127 = aes_multiply(aes_square(c63), c);
-  unsigned char c254 = aes_square(c127);
-  unsigned char f[8], hh[8], result;
+  w[0] = sbox[w[0]]; w[1] = sbox[w[1]]; w[2] = sbox[w[2]]; w[3] = sbox[w[3]];
+}
+
+static void rotword(uint8_t w[4])
+{
+  uint8_t t = w[0]; w[0] = w[1]; w[1] = w[2]; w[2] = w[3]; w[3] = t;
+}
+
+static void aes256_key_expand(const uint8_t key[32], uint8_t rk[240])
+{
+  memcpy(rk, key, 32);
+  uint8_t temp[4];
+  int i = 32, r = 1;
+  while (i < 240) {
+    temp[0] = rk[i-4]; temp[1] = rk[i-3]; temp[2] = rk[i-2]; temp[3] = rk[i-1];
+    if ((i % 32) == 0) { rotword(temp); subword(temp); temp[0] ^= rcon((uint8_t)r++); }
+    else if ((i % 32) == 16) { subword(temp); }
+    rk[i] = rk[i-32] ^ temp[0]; rk[i+1] = rk[i-31] ^ temp[1];
+    rk[i+2] = rk[i-30] ^ temp[2]; rk[i+3] = rk[i-29] ^ temp[3];
+    i += 4;
+  }
+}
+
+static uint8_t xtime(uint8_t x) { return (uint8_t)((x << 1) ^ ((x & 0x80) ? 0x1B : 0)); }
+
+static void subbytes_shiftrows(uint8_t s[16])
+{
+  uint8_t t[16];
   int i;
-  for (i = 0; i < 8; ++i) f[i] = (c254 >> i) & 1;
-  hh[0] = f[0] ^ f[4] ^ f[5] ^ f[6] ^ f[7] ^ 1;
-  hh[1] = f[1] ^ f[5] ^ f[6] ^ f[7] ^ f[0] ^ 1;
-  hh[2] = f[2] ^ f[6] ^ f[7] ^ f[0] ^ f[1];
-  hh[3] = f[3] ^ f[7] ^ f[0] ^ f[1] ^ f[2];
-  hh[4] = f[4] ^ f[0] ^ f[1] ^ f[2] ^ f[3];
-  hh[5] = f[5] ^ f[1] ^ f[2] ^ f[3] ^ f[4] ^ 1;
-  hh[6] = f[6] ^ f[2] ^ f[3] ^ f[4] ^ f[5] ^ 1;
-  hh[7] = f[7] ^ f[3] ^ f[4] ^ f[5] ^ f[6];
-  result = 0;
-  for (i = 0; i < 8; ++i) result |= hh[i] << i;
-  return result;
+  for (i = 0; i < 16; ++i) t[i] = sbox[s[i]];
+  s[0]=t[0]; s[4]=t[4]; s[8]=t[8]; s[12]=t[12];
+  s[1]=t[5]; s[5]=t[9]; s[9]=t[13]; s[13]=t[1];
+  s[2]=t[10]; s[6]=t[14]; s[10]=t[2]; s[14]=t[6];
+  s[3]=t[15]; s[7]=t[3]; s[11]=t[7]; s[15]=t[11];
 }
 
-static void aes256_encrypt(unsigned char *out, const unsigned char *in,
-                            const unsigned char *k)
+static void mixcolumns(uint8_t s[16])
 {
-  unsigned char expanded[4][60];
-  unsigned char state[4][4], newstate[4][4];
-  unsigned char roundconstant;
-  int i, j, r;
-
-  for (j = 0; j < 8; ++j)
-    for (i = 0; i < 4; ++i)
-      expanded[i][j] = k[j * 4 + i];
-
-  roundconstant = 1;
-  for (j = 8; j < 60; ++j) {
-    unsigned char temp[4];
-    if (j % 4)
-      for (i = 0; i < 4; ++i) temp[i] = expanded[i][j - 1];
-    else if (j % 8)
-      for (i = 0; i < 4; ++i) temp[i] = aes_bytesub(expanded[i][j - 1]);
-    else {
-      for (i = 0; i < 4; ++i) temp[i] = aes_bytesub(expanded[(i + 1) % 4][j - 1]);
-      temp[0] ^= roundconstant;
-      roundconstant = aes_xtime(roundconstant);
-    }
-    for (i = 0; i < 4; ++i)
-      expanded[i][j] = temp[i] ^ expanded[i][j - 8];
+  int c;
+  for (c = 0; c < 4; ++c) {
+    int ii = 4 * c;
+    uint8_t a0 = s[ii+0], a1 = s[ii+1], a2 = s[ii+2], a3 = s[ii+3];
+    s[ii+0] = (uint8_t)(xtime(a0) ^ (a1 ^ xtime(a1)) ^ a2 ^ a3);
+    s[ii+1] = (uint8_t)(a0 ^ xtime(a1) ^ (a2 ^ xtime(a2)) ^ a3);
+    s[ii+2] = (uint8_t)(a0 ^ a1 ^ xtime(a2) ^ (a3 ^ xtime(a3)));
+    s[ii+3] = (uint8_t)((a0 ^ xtime(a0)) ^ a1 ^ a2 ^ xtime(a3));
   }
+}
 
-  for (j = 0; j < 4; ++j)
-    for (i = 0; i < 4; ++i)
-      state[i][j] = in[j * 4 + i] ^ expanded[i][j];
+static void addroundkey(uint8_t s[16], const uint8_t *rk)
+{
+  int i;
+  for (i = 0; i < 16; ++i) s[i] ^= rk[i];
+}
 
-  for (r = 0; r < 14; ++r) {
-    for (i = 0; i < 4; ++i)
-      for (j = 0; j < 4; ++j)
-        newstate[i][j] = aes_bytesub(state[i][j]);
-    for (i = 0; i < 4; ++i)
-      for (j = 0; j < 4; ++j)
-        state[i][j] = newstate[i][(j + i) % 4];
-    if (r < 13)
-      for (j = 0; j < 4; ++j) {
-        unsigned char a0 = state[0][j];
-        unsigned char a1 = state[1][j];
-        unsigned char a2 = state[2][j];
-        unsigned char a3 = state[3][j];
-        state[0][j] = aes_xtime(a0 ^ a1) ^ a1 ^ a2 ^ a3;
-        state[1][j] = aes_xtime(a1 ^ a2) ^ a2 ^ a3 ^ a0;
-        state[2][j] = aes_xtime(a2 ^ a3) ^ a3 ^ a0 ^ a1;
-        state[3][j] = aes_xtime(a3 ^ a0) ^ a0 ^ a1 ^ a2;
-      }
-    for (i = 0; i < 4; ++i)
-      for (j = 0; j < 4; ++j)
-        state[i][j] ^= expanded[i][r * 4 + 4 + j];
-  }
-
-  for (j = 0; j < 4; ++j)
-    for (i = 0; i < 4; ++i)
-      out[j * 4 + i] = state[i][j];
+static void aes256_encrypt_block(uint8_t out[16], const uint8_t in[16],
+                                  const uint8_t rk[240])
+{
+  uint8_t s[16];
+  int r;
+  memcpy(s, in, 16);
+  addroundkey(s, rk);
+  for (r = 1; r <= 13; ++r) { subbytes_shiftrows(s); mixcolumns(s); addroundkey(s, rk + 16*r); }
+  subbytes_shiftrows(s);
+  addroundkey(s, rk + 224);
+  memcpy(out, s, 16);
 }
 
 /* ================================================================== */
@@ -136,10 +124,85 @@ static int verify16(const unsigned char *x, const unsigned char *y)
 }
 
 /* ================================================================== */
-/* GCM helper functions (bit-level GF(2^128))                         */
+/* 4-bit table GHASH (Shoup method)                                   */
 /* ================================================================== */
 
-#define AES(out, in, k) aes256_encrypt(out, in, k)
+static const uint16_t ghash_R[16] = {
+  0x0000, 0x1c20, 0x3840, 0x2460, 0x7080, 0x6ca0, 0x48c0, 0x54e0,
+  0xe100, 0xfd20, 0xd940, 0xc560, 0x9180, 0x8da0, 0xa9c0, 0xb5e0
+};
+
+static void ghash_setup(unsigned char M[16][16], const unsigned char H[16])
+{
+  int i, k;
+  unsigned char lsb;
+
+  memset(M[0], 0, 16);
+  memcpy(M[8], H, 16);
+
+  memcpy(M[4], M[8], 16);
+  lsb = M[4][15] & 1;
+  for (k = 15; k > 0; --k) M[4][k] = (M[4][k] >> 1) | (M[4][k-1] << 7);
+  M[4][0] >>= 1;
+  if (lsb) M[4][0] ^= 0xe1;
+
+  memcpy(M[2], M[4], 16);
+  lsb = M[2][15] & 1;
+  for (k = 15; k > 0; --k) M[2][k] = (M[2][k] >> 1) | (M[2][k-1] << 7);
+  M[2][0] >>= 1;
+  if (lsb) M[2][0] ^= 0xe1;
+
+  memcpy(M[1], M[2], 16);
+  lsb = M[1][15] & 1;
+  for (k = 15; k > 0; --k) M[1][k] = (M[1][k] >> 1) | (M[1][k-1] << 7);
+  M[1][0] >>= 1;
+  if (lsb) M[1][0] ^= 0xe1;
+
+  for (i = 3; i < 16; i++) {
+    int lo, hi;
+    if ((i & (i - 1)) == 0) continue;
+    lo = i & (-i);
+    hi = i ^ lo;
+    for (k = 0; k < 16; k++) M[i][k] = M[lo][k] ^ M[hi][k];
+  }
+}
+
+static void addmul(unsigned char *acc,
+                    const unsigned char *x, unsigned long long xlen,
+                    unsigned char M[16][16])
+{
+  int i, k;
+  unsigned char nib;
+  unsigned char Z[16];
+
+  for (i = 0; i < (int)xlen; ++i) acc[i] ^= x[i];
+
+  memset(Z, 0, 16);
+
+  for (i = 15; i >= 0; --i) {
+    nib = Z[15] & 0x0f;
+    for (k = 15; k > 0; --k) Z[k] = (Z[k] >> 4) | (Z[k-1] << 4);
+    Z[0] >>= 4;
+    Z[0] ^= (unsigned char)(ghash_R[nib] >> 8);
+    Z[1] ^= (unsigned char)(ghash_R[nib] & 0xff);
+    nib = acc[i] & 0x0f;
+    for (k = 0; k < 16; ++k) Z[k] ^= M[nib][k];
+
+    nib = Z[15] & 0x0f;
+    for (k = 15; k > 0; --k) Z[k] = (Z[k] >> 4) | (Z[k-1] << 4);
+    Z[0] >>= 4;
+    Z[0] ^= (unsigned char)(ghash_R[nib] >> 8);
+    Z[1] ^= (unsigned char)(ghash_R[nib] & 0xff);
+    nib = (acc[i] >> 4) & 0x0f;
+    for (k = 0; k < 16; ++k) Z[k] ^= M[nib][k];
+  }
+
+  memcpy(acc, Z, 16);
+}
+
+/* ================================================================== */
+/* GCM helpers                                                        */
+/* ================================================================== */
 
 static void gcm_store32(unsigned char *x, unsigned long long u)
 {
@@ -153,35 +216,11 @@ static void gcm_store64(unsigned char *x, unsigned long long u)
   for (i = 7; i >= 0; --i) { x[i] = (unsigned char)u; u >>= 8; }
 }
 
-static void addmul(unsigned char *a,
-                    const unsigned char *x, unsigned long long xlen,
-                    const unsigned char *y)
-{
-  int i, j;
-  unsigned char abits[128], ybits[128], prodbits[256];
-  for (i = 0; i < (int)xlen; ++i) a[i] ^= x[i];
-  for (i = 0; i < 128; ++i) abits[i] = (a[i / 8] >> (7 - (i % 8))) & 1;
-  for (i = 0; i < 128; ++i) ybits[i] = (y[i / 8] >> (7 - (i % 8))) & 1;
-  for (i = 0; i < 256; ++i) prodbits[i] = 0;
-  for (i = 0; i < 128; ++i)
-    for (j = 0; j < 128; ++j)
-      prodbits[i + j] ^= abits[i] & ybits[j];
-  for (i = 127; i >= 0; --i) {
-    prodbits[i] ^= prodbits[i + 128];
-    prodbits[i + 1] ^= prodbits[i + 128];
-    prodbits[i + 2] ^= prodbits[i + 128];
-    prodbits[i + 7] ^= prodbits[i + 128];
-    prodbits[i + 128] ^= prodbits[i + 128];
-  }
-  for (i = 0; i < 16; ++i) a[i] = 0;
-  for (i = 0; i < 128; ++i) a[i / 8] |= (prodbits[i] << (7 - (i % 8)));
-}
-
-/* ================================================================== */
-/* GCM encrypt / decrypt                                              */
-/* ================================================================== */
-
 static const unsigned char gcm_zero[16] = {0};
+
+/* ================================================================== */
+/* GCM encrypt                                                        */
+/* ================================================================== */
 
 int crypto_aead_encrypt(
   unsigned char *c, unsigned long long *clen,
@@ -192,30 +231,32 @@ int crypto_aead_encrypt(
   const unsigned char *k
 )
 {
-  unsigned char kcopy[32];
-  unsigned char H[16], J[16], T[16], accum[16], stream[16], finalblock[16];
+  unsigned char rk[240];
+  unsigned char H[16], M[16][16];
+  unsigned char J[16], T[16], accum[16], stream[16], finalblock[16];
   unsigned long long i, index;
   (void)nsec;
 
-  for (i = 0; i < 32; ++i) kcopy[i] = k[i];
+  aes256_key_expand(k, rk);
 
   *clen = mlen + 16;
   gcm_store64(finalblock, 8 * adlen);
   gcm_store64(finalblock + 8, 8 * mlen);
 
-  AES(H, gcm_zero, kcopy);
+  aes256_encrypt_block(H, gcm_zero, rk);
+  ghash_setup(M, H);
 
   for (i = 0; i < 12; ++i) J[i] = npub[i];
   index = 1;
   gcm_store32(J + 12, index);
-  AES(T, J, kcopy);
+  aes256_encrypt_block(T, J, rk);
 
   for (i = 0; i < 16; ++i) accum[i] = 0;
 
   while (adlen > 0) {
     unsigned long long blocklen = 16;
     if (adlen < blocklen) blocklen = adlen;
-    addmul(accum, ad, blocklen, H);
+    addmul(accum, ad, blocklen, M);
     ad += blocklen;
     adlen -= blocklen;
   }
@@ -225,18 +266,22 @@ int crypto_aead_encrypt(
     if (mlen < blocklen) blocklen = mlen;
     ++index;
     gcm_store32(J + 12, index);
-    AES(stream, J, kcopy);
+    aes256_encrypt_block(stream, J, rk);
     for (i = 0; i < blocklen; ++i) c[i] = m[i] ^ stream[i];
-    addmul(accum, c, blocklen, H);
+    addmul(accum, c, blocklen, M);
     c += blocklen;
     m += blocklen;
     mlen -= blocklen;
   }
 
-  addmul(accum, finalblock, 16, H);
+  addmul(accum, finalblock, 16, M);
   for (i = 0; i < 16; ++i) c[i] = T[i] ^ accum[i];
   return 0;
 }
+
+/* ================================================================== */
+/* GCM decrypt                                                        */
+/* ================================================================== */
 
 int crypto_aead_decrypt(
   unsigned char *m, unsigned long long *outputmlen,
@@ -247,33 +292,35 @@ int crypto_aead_decrypt(
   const unsigned char *k
 )
 {
-  unsigned char kcopy[32];
-  unsigned char H[16], J[16], T[16], accum[16], stream[16], finalblock[16];
+  unsigned char rk[240];
+  unsigned char H[16], M[16][16];
+  unsigned char J[16], T[16], accum[16], stream[16], finalblock[16];
   unsigned long long mlen, origmlen, index, i;
   const unsigned char *origc;
   (void)nsec;
 
-  for (i = 0; i < 32; ++i) kcopy[i] = k[i];
-
   if (clen < 16) return -1;
   mlen = clen - 16;
+
+  aes256_key_expand(k, rk);
 
   gcm_store64(finalblock, 8 * adlen);
   gcm_store64(finalblock + 8, 8 * mlen);
 
-  AES(H, gcm_zero, kcopy);
+  aes256_encrypt_block(H, gcm_zero, rk);
+  ghash_setup(M, H);
 
   for (i = 0; i < 12; ++i) J[i] = npub[i];
   index = 1;
   gcm_store32(J + 12, index);
-  AES(T, J, kcopy);
+  aes256_encrypt_block(T, J, rk);
 
   for (i = 0; i < 16; ++i) accum[i] = 0;
 
   while (adlen > 0) {
     unsigned long long blocklen = 16;
     if (adlen < blocklen) blocklen = adlen;
-    addmul(accum, ad, blocklen, H);
+    addmul(accum, ad, blocklen, M);
     ad += blocklen;
     adlen -= blocklen;
   }
@@ -283,12 +330,12 @@ int crypto_aead_decrypt(
   while (mlen > 0) {
     unsigned long long blocklen = 16;
     if (mlen < blocklen) blocklen = mlen;
-    addmul(accum, c, blocklen, H);
+    addmul(accum, c, blocklen, M);
     c += blocklen;
     mlen -= blocklen;
   }
 
-  addmul(accum, finalblock, 16, H);
+  addmul(accum, finalblock, 16, M);
   for (i = 0; i < 16; ++i) accum[i] ^= T[i];
   if (verify16(accum, c) != 0) return -1;
 
@@ -301,7 +348,7 @@ int crypto_aead_decrypt(
     if (mlen < blocklen) blocklen = mlen;
     ++index;
     gcm_store32(J + 12, index);
-    AES(stream, J, kcopy);
+    aes256_encrypt_block(stream, J, rk);
     for (i = 0; i < blocklen; ++i) m[i] = c[i] ^ stream[i];
     c += blocklen;
     m += blocklen;

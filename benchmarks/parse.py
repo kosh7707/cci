@@ -135,7 +135,7 @@ def compute_cpb_table(grouped, measure_type='encrypt_cycles',
                       target_sizes=None):
     """Build {primitive: {mlen: cpb}} for adlen=0 rows."""
     if target_sizes is None:
-        target_sizes = [0, 16, 64, 128, 256, 512, 1024, 1536, 2048]
+        target_sizes = [0, 16, 32, 64, 128, 256, 512, 1024, 2048]
 
     # collect all primitives and available mlens for adlen=0
     prim_data = defaultdict(dict)
@@ -309,7 +309,7 @@ def print_errors(errors):
 # ── Output: CPB table (markdown) ────────────────────────────────
 
 def print_cpb_table(grouped, measure_type='encrypt_cycles'):
-    sizes = [0, 16, 64, 128, 256, 512, 1024, 1536, 2048]
+    sizes = [0, 16, 32, 64, 128, 256, 512, 1024, 2048]
     table = compute_cpb_table(grouped, measure_type, sizes)
 
     if not table:
