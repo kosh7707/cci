@@ -1,4 +1,4 @@
-# CCI: Counter-based Cipher with Integrity
+# CCI: Counter Composite Integrity
 
 SUPERCOP benchmark implementations and measurement results for the CCI
 authenticated encryption scheme, as described in:
