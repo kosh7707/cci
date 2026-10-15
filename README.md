@@ -2,7 +2,7 @@
 
 SUPERCOP benchmark implementations and measurement results for the CCI authenticated encryption scheme, as described in:
 
-> **CCI: An AEAD with Modular Hash-Based Authentication**
+> **CCI: An AEAD with Modular Hash-Based Authentication in the Secret-Nonce Model**
 > *(IEEE Access, 2026)* -- [DOI: TBD]
 
 ## Overview
@@ -188,7 +188,7 @@ If you use this code or data in your research, please cite:
 
 ```bibtex
 @article{cci2026,
-  title   = {CCI: An AEAD with Modular Hash-Based Authentication},
+  title   = {CCI: An AEAD with Modular Hash-Based Authentication in the Secret-Nonce Model},
   author  = {Sehwa Ko and Kyeongmin Lee and Junyoung Son},
   journal = {IEEE Access},
   year    = {2026},
