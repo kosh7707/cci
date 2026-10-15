@@ -1,27 +1,19 @@
 # CCI: Counter Composite Integrity
 
-SUPERCOP benchmark implementations and measurement results for the CCI
-authenticated encryption scheme, as described in:
+SUPERCOP benchmark implementations and measurement results for the CCI authenticated encryption scheme, as described in:
 
 > **CCI: An AEAD with Modular Hash-Based Authentication**
 > *(IEEE Access, 2026)* -- [DOI: TBD]
 
 ## Overview
 
-CCI is an authenticated encryption with associated data (AEAD) scheme that
-combines AES in CTR mode with a cryptographic hash function in a
-Mac-then-Encrypt paradigm.  The hash is computed over serialized plaintext,
-associated data, and a secret nonce, then encrypted alongside the plaintext.
+CCI is an authenticated encryption with associated data (AEAD) scheme that combines AES in CTR mode with a cryptographic hash function in a Mac-then-Encrypt paradigm.  The hash is computed over serialized plaintext, associated data, and a secret nonce, then encrypted alongside the plaintext.
 
-This repository contains the exact source code and raw benchmark data used in
-the paper.  All implementations conform to the
-[SUPERCOP](https://bench.cr.yp.to/supercop.html) `crypto_aead` API (eBAEAD).
+This repository contains the exact source code and raw benchmark data used in the paper.  All implementations conform to the [SUPERCOP](https://bench.cr.yp.to/supercop.html) `crypto_aead` API (eBAEAD).
 
 ## Primitives
 
-Sixteen AEAD primitives are included: eight CCI variants and eight standard
-baselines.  Each primitive has an optimized implementation (using OpenSSL/AES-NI)
-and a portable reference implementation in pure C.
+16 AEAD primitives are included: 8 CCI variants and 8 standard baselines.  Each primitive has an optimized implementation (using OpenSSL/AES-NI) and a portable reference implementation in Portable-C.
 
 | Primitive | Key (bytes) | Nonce (bytes) | Tag (bytes) | Type |
 |-----------|-------------|---------------|-------------|------|
@@ -34,12 +26,9 @@ and a portable reference implementation in pure C.
 | `aes128ccm` | 16 | 12 | 16 | AES-CCM baseline |
 | `chacha20poly1305` | 32 | 12 | 16 | ChaCha20-Poly1305 baseline |
 
-Each has a corresponding `*ref` variant (e.g., `aes128cciblake3ref`) that uses
-only portable C code with no hardware acceleration.
+Each has a corresponding `*ref` variant (e.g., `aes128cciblake3ref`) that uses only portable C code with no hardware acceleration.
 
-CCI variants use a 28-byte nonce: the first 12 bytes are the public nonce (n1)
-for CTR mode, and the last 16 bytes are the secret nonce (n2) that is hashed
-into the authentication tag.
+CCI variants use a 28-byte nonce: the first 12 bytes are the public nonce (n1) for CTR mode, and the last 16 bytes are the secret nonce (n2) that is hashed into the authentication tag.
 
 ## Repository Structure
 
@@ -60,40 +49,29 @@ into the authentication tag.
 │   ├── ...                         # (16 primitives total)
 │   └── chacha20poly1305ref/ref/
 └── benchmarks/
-    ├── data                        # Raw SUPERCOP measurement data
+    ├── reproduce.sh                # Runs the whole benchmark with SUPERCOP and writes data + result.txt
+    ├── data                        # Raw SUPERCOP measurement data (three sections, see below)
     ├── result.txt                  # Parsed benchmark summary
     ├── parse.py                    # Benchmark data parser
     └── DATA_FORMAT.md              # Guide to reading the raw data
 ```
 
-## Building with SUPERCOP
+## Reproducing the Benchmarks
 
-These implementations are designed to be built by SUPERCOP's automated
-orchestration.  To reproduce the benchmarks:
+The implementations are built and timed by SUPERCOP's own orchestration. One script runs the whole experiment:
 
 1. Obtain SUPERCOP (version 20260217 or later) from
-   https://bench.cr.yp.to/supercop.html
+   https://bench.cr.yp.to/supercop.html and unpack it.
 
-2. Copy each primitive directory into SUPERCOP's `crypto_aead/` tree:
+2. Run:
    ```bash
-   cp -r crypto_aead/aes128cciblake3 /path/to/supercop/crypto_aead/
-   # repeat for all 16 primitives and _shared
+   sh benchmarks/reproduce.sh /path/to/supercop
    ```
 
-3. Run the benchmark:
-   ```bash
-   cd /path/to/supercop
-   ./do-part crypto_aead    # benchmarks all crypto_aead primitives
-   ```
+The script copies the 16 primitive directories into `<supercop>/crypto_aead/`, sets `TIMINGS` to 7 in `<supercop>/crypto_aead/measure.c` (the value used for the paper), runs `./do-part crypto_aead <primitive>` for each primitive in turn, and appends SUPERCOP's output to `benchmarks/data`.  It then takes the four AES-128 OpenSSL-backed binaries that SUPERCOP selected and runs them again with OpenSSL's instruction-set support restricted (see below), appending those records below separator lines, and finally writes
+`benchmarks/result.txt` with `parse.py`.  On a fresh SUPERCOP tree the script first runs `./do-part init`, which builds SUPERCOP's support libraries and can take a long time; the measurements themselves take a few minutes.
 
-4. Parse the results:
-   ```bash
-   python3 benchmarks/parse.py /path/to/supercop/bench/*/data --txt results.txt
-   ```
-
-**Note:** OpenSSL implementations (`openssl/` subdirectories) require OpenSSL
-development headers and libraries to be installed.  Reference implementations
-(`ref/` subdirectories) have no external dependencies.
+**Note:** OpenSSL implementations (`openssl/` subdirectories) require OpenSSL development headers and libraries to be installed.  Reference implementations (`ref/` subdirectories) have no external dependencies.
 
 ## Benchmark Results
 
@@ -113,28 +91,77 @@ development headers and libraries to be installed.  Reference implementations
 
 | Primitive | 0\* | 64 | 256 | 1024 | 2048 |
 |-----------|----:|----:|-----:|------:|------:|
-| AES-128-GCM | 1,873 | 28.0 | 7.3 | 2.1 | 1.2 |
-| AES-256-GCM | 1,867 | 28.4 | 7.4 | 2.2 | 1.3 |
-| AES-128-CCM | 1,657 | 24.9 | 7.0 | 2.7 | 2.0 |
-| ChaCha20-Poly1305 | 2,215 | 32.7 | 9.6 | 3.0 | 2.2 |
-| CCI-128-SHA256 | 1,455 | 32.4 | 9.4 | 3.5 | 2.7 |
-| CCI-256-SHA256 | 1,645 | 39.1 | 9.4 | 3.6 | 2.6 |
-| CCI-128-BLAKE3 | 709 | 23.5 | 7.7 | 4.0 | 3.3 |
-| CCI-256-BLAKE3 | 898 | 30.0 | 7.9 | 4.0 | 3.3 |
+| AES-128-GCM | 1,819 | 26.9 | 7.0 | 2.0 | 1.2 |
+| AES-256-GCM | 1,808 | 27.4 | 7.0 | 2.1 | 1.2 |
+| AES-128-CCM | 1,612 | 22.9 | 6.6 | 2.6 | 2.0 |
+| ChaCha20-Poly1305 | 2,144 | 30.9 | 9.1 | 2.9 | 2.0 |
+| CCI-128-SHA256 | 1,467 | 32.3 | 9.2 | 3.4 | 2.5 |
+| CCI-256-SHA256 | 1,566 | 38.3 | 9.1 | 3.6 | 2.7 |
+| CCI-128-BLAKE3 | 688 | 23.6 | 7.7 | 3.9 | 3.2 |
+| CCI-256-BLAKE3 | 887 | 30.2 | 7.7 | 4.0 | 3.3 |
 
 \* Column "0" shows raw cycle count for a 1-byte message (overhead), not CPB.
 
-Full results including reference implementations and decrypt measurements are
-in [`benchmarks/result.txt`](benchmarks/result.txt).
+Cycle counts are SUPERCOP's *stq2* metric (stabilized second quartile over seven independent timings).  For each primitive SUPERCOP measures only the
+compiler variant that scored best in its `try` stage (the `compiler` record
+in the data file names it); every measurement point is timed in three rounds
+(`LOOPS=3`), and the table reports the minimum across those three rounds.
 
-Cycle counts are SUPERCOP's *stq2* metric (stabilized second quartile over
-seven independent timings); the minimum across compiler variants is reported.
+### Instruction-set masking (same binaries, OpenSSL restricted)
+
+The table above is measured with every instruction-set extension of the host
+available.  In the same run, the four AES-128 OpenSSL-backed binaries that
+SUPERCOP selected are executed again with OpenSSL's CPU-capability vector
+masked through the `OPENSSL_ia32cap` environment variable, which libcrypto
+reads once at load time.  This shows how the relative cost of the AES-based
+options changes when AES-NI stays available but PCLMULQDQ (used by GHASH)
+does not, and how the choice of hash inside CCI changes when the SHA
+extensions are also unavailable.
+
+| `OPENSSL_ia32cap` | Effect |
+|-------------------|--------|
+| `~0x200000000:~0x0` | bit 33 (PCLMULQDQ) cleared; AES-NI, AVX2 and SHA extensions kept |
+| `~0x200000000:~0x20000000` | additionally bit 64+29 (SHA extensions) cleared |
+
+The second, colon-separated value must be written explicitly: if it is
+omitted, OpenSSL zeroes every CPUID(7) bit (AVX2, SHA, and others).  Masking
+changes only OpenSSL's internal code-path selection; BLAKE3, which is compiled
+into the primitive, is unaffected.  For messages up to 64 bytes the CCI
+implementation uses OpenSSL's low-level table-based AES, so those cells do not
+isolate authentication acceleration.  The masks emulate missing instruction
+support on this host; they do not reproduce any specific CPU.
+
+Encrypt, cycles per byte, `OPENSSL_ia32cap=~0x200000000:~0x0`:
+
+| Primitive | 0\* | 64 | 256 | 1024 | 2048 |
+|-----------|----:|----:|-----:|------:|------:|
+| AES-128-GCM | 1,886 | 35.4 | 12.2 | 6.1 | 5.1 |
+| AES-128-CCM | 1,580 | 30.8 | 7.9 | 2.8 | 2.2 |
+| CCI-128-SHA256 | 1,372 | 35.2 | 9.3 | 3.8 | 2.5 |
+| CCI-128-BLAKE3 | 707 | 23.5 | 8.7 | 4.1 | 3.3 |
+
+Encrypt, cycles per byte, `OPENSSL_ia32cap=~0x200000000:~0x20000000`:
+
+| Primitive | 0\* | 64 | 256 | 1024 | 2048 |
+|-----------|----:|----:|-----:|------:|------:|
+| AES-128-GCM | 1,869 | 34.1 | 12.2 | 6.2 | 5.0 |
+| AES-128-CCM | 1,602 | 25.3 | 7.5 | 2.9 | 2.1 |
+| CCI-128-SHA256 | 1,661 | 39.9 | 13.7 | 7.1 | 6.1 |
+| CCI-128-BLAKE3 | 697 | 23.8 | 8.5 | 4.2 | 3.3 |
+
+Full results, including reference implementations, decrypt measurements and
+all message sizes for every section, are in
+[`benchmarks/result.txt`](benchmarks/result.txt).
 
 ## Parsing Raw Data
 
-The raw SUPERCOP `data` file contains 147,000+ lines of measurement,
-compiler, and test records.  See [`benchmarks/DATA_FORMAT.md`](benchmarks/DATA_FORMAT.md)
-for a detailed description of the file format.
+The raw SUPERCOP `data` file contains about 221,000 lines of measurement,
+compiler, and test records in three sections: the default run of all 16
+primitives, then, below a separator line of the form
+`==================== OPENSSL_ia32cap=... ====================`, the records
+of each masked run.  `parse.py` prints one set of tables per section.  See
+[`benchmarks/DATA_FORMAT.md`](benchmarks/DATA_FORMAT.md) for a detailed
+description of the file format.
 
 ```bash
 cd benchmarks
@@ -162,9 +189,14 @@ If you use this code or data in your research, please cite:
 ```bibtex
 @article{cci2026,
   title   = {CCI: An AEAD with Modular Hash-Based Authentication},
-  author  = {TBD},
+  author  = {Sehwa Ko and Kyeongmin Lee and Junyoung Son},
   journal = {IEEE Access},
   year    = {2026},
   doi     = {TBD}
 }
 ```
+
+## Acknowledgement
+
+The implementations and the benchmark tooling in this repository were
+developed together with Claude (Anthropic), used through Claude Code.

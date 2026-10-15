@@ -27,6 +27,26 @@ Every line follows the same 7-field prefix:
 The **primitive name** is everything before the `/` in field 6
 (e.g., `aes128cciblake3` from `aes128cciblake3/timingleaks`).
 
+## Sections
+
+`reproduce.sh` writes the file in three sections.  The first section is the
+default run of all 16 primitives.  Each further section starts with a
+separator line of the form
+
+```
+==================== OPENSSL_ia32cap=~0x200000000:~0x0 ====================
+```
+
+and contains the records of the four AES-128 OpenSSL-backed primitives
+(`aes128gcm`, `aes128ccm`, `aes128ccisha256`, `aes128cciblake3`) run again
+with the *same* `measure` binaries SUPERCOP selected in the first section, but
+with OpenSSL's CPU-capability vector masked by that `OPENSSL_ia32cap` value
+(set in the environment of each process).  The records themselves have the
+ordinary 7-field prefix; only the separator line marks the condition.
+`parse.py` treats every line beginning with `=` as the start of a new section
+and reports each section separately, so records of the same primitive are
+never pooled across conditions.
+
 ## Record Types
 
 ### Measurement records
@@ -59,9 +79,11 @@ This means: AES-128-GCM, encrypting 1 byte of plaintext with 0 bytes of AD,
 median cycle count = 1805.  The seven individual measurements were
 1805+3316=5121, 1805+75=1880, 1805-3=1802, etc.
 
-**Multiple records per (primitive, size) pair** are normal.  SUPERCOP tries
-multiple compiler flag combinations; each produces a separate measurement line.
-The best (lowest stq2) across compilers represents the primitive's performance.
+**Multiple records per (primitive, size) pair** are normal.  SUPERCOP's
+`measure` driver times every point in three rounds (`LOOPS=3`), and each round
+produces a separate measurement line.  Only one compiler variant is measured:
+the one that scored best in the `try` stage (named by the `compiler` record).
+The minimum stq2 across the three rounds represents the primitive's performance.
 
 ### Metadata records
 
@@ -100,8 +122,8 @@ To compute CPB from the raw data:
 
 1. **Filter** records by `record_type` (e.g., `encrypt_cycles`) and desired `adlen` (typically 0)
 2. **Decode** the encoded size: `adlen = encoded_size // 1000000`, `mlen = encoded_size % 1000000`
-3. **Group** by `(primitive, mlen)` across all compiler variants
-4. **Select** the minimum `stq2` per group (best compiler)
+3. **Group** by `(primitive, mlen)` across the three measurement rounds
+4. **Select** the minimum `stq2` per group (best round; only one compiler variant is measured)
 5. **Divide** `stq2 / mlen` to get CPB
 6. For mlen=1, report raw cycles (overhead) rather than CPB
 

@@ -35,6 +35,7 @@ class Measurement:
     mlen: int
     stq2: int          # robust median cycles
     deltas: list[int] = field(default_factory=list)
+    section: str = ''  # '' = default run; otherwise the separator label, e.g. 'OPENSSL_ia32cap=~0x200000000:~0x0'
 
 
 @dataclass
@@ -64,8 +65,15 @@ def parse_data(filepath: str):
                  'implementation', 'compiler', 'cpucycles_persecond',
                  'cpucycles_implementation', 'cpuid'}
 
+    section = ''
     with open(filepath) as f:
         for line in f:
+            if line.startswith('='):
+                # section separator written by reproduce.sh, e.g.
+                # "==================== OPENSSL_ia32cap=~0x200000000:~0x0 ===================="
+                # records that follow were measured under that setting
+                section = line.strip().strip('=').strip()
+                continue
             parts = line.strip().split()
             if len(parts) < 7:
                 continue
@@ -86,6 +94,7 @@ def parse_data(filepath: str):
                     mlen=encoded_size % 1_000_000,
                     stq2=stq2,
                     deltas=deltas,
+                    section=section,
                 ))
 
             elif record_type in meta_keys and len(parts) >= 8:
@@ -356,14 +365,14 @@ def print_csv(measurements):
 
     out = io.StringIO()
     writer = csvmod.writer(out)
-    writer.writerow(['primitive', 'display_name', 'type', 'adlen', 'mlen',
+    writer.writerow(['section', 'primitive', 'display_name', 'type', 'adlen', 'mlen',
                      'stq2_cycles', 'delta_min', 'delta_max'])
 
-    for m in sorted(measurements, key=lambda x: (x.primitive, x.measure_type,
+    for m in sorted(measurements, key=lambda x: (x.section, x.primitive, x.measure_type,
                                                    x.adlen, x.mlen)):
         dmin = min(m.deltas) if m.deltas else 0
         dmax = max(m.deltas) if m.deltas else 0
-        writer.writerow([m.primitive, display_name(m.primitive),
+        writer.writerow([m.section, m.primitive, display_name(m.primitive),
                          m.measure_type, m.adlen, m.mlen,
                          m.stq2, dmin, dmax])
 
@@ -406,20 +415,31 @@ def main():
 
     try:
         measurements, info, errors = parse_data(str(data_path))
-        grouped = group_measurements(measurements)
+        sections = []  # in file order; '' (default run) comes first
+        for m in measurements:
+            if m.section not in sections:
+                sections.append(m.section)
 
         if '--csv' in flags:
             print_csv(measurements)
             return
 
         print_eval_env()
-        print_summary(measurements, info, errors)
+        print_summary([m for m in measurements if m.section == (sections[0] if sections else '')],
+                      info, errors)
 
         if '--errors' in flags:
             print_errors(errors)
 
-        print_cpb_table(grouped, 'encrypt_cycles')
-        print_cpb_table(grouped, 'decrypt_cycles')
+        for sec in sections:
+            if len(sections) > 1:
+                print()
+                print("=" * 60)
+                print(sec if sec else "Default run (no OPENSSL_ia32cap mask)")
+                print("=" * 60)
+            grouped = group_measurements([m for m in measurements if m.section == sec])
+            print_cpb_table(grouped, 'encrypt_cycles')
+            print_cpb_table(grouped, 'decrypt_cycles')
     finally:
         if fh:
             sys.stdout = orig_stdout
